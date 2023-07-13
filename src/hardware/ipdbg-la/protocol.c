@@ -65,9 +65,14 @@
 
 #define CMD_GET_FEATURES           0x10
 #define CMD_GET_RLC_WIDTH          0x60
+#define CMD_GET_CHANNEL_NAMES      0x70
+#define CMD_GET_SAMPLE_RATE        0x80
 
-#define FEATURE_AUGMENTER_APP_ENABLED   0x00000001
-#define FEATURE_RUNLENGTH_CODER_ENABLED 0x00000002
+const uint32_t FEATURE_AUGMENTER_APP_ENABLED =          0x00000001;
+const uint32_t FEATURE_RUNLENGTH_CODER_ENABLED =        0x00000002;
+const uint32_t FEATURE_AUGMENTER_SAMPLERATE_ENABLED =   0x00000004;
+const uint32_t FEATURE_AUGMENTER_CH_NAMES_ENABLED =     0x00000008;
+
 
 static const uint8_t host_word_size = 8;
 
@@ -200,7 +205,6 @@ static int tcp_receive_blocking(struct ipdbg_la_tcp *tcp,
 			g_usleep(1000);
 		}
 	}
-
 	return received;
 }
 
@@ -383,7 +387,6 @@ SR_PRIV int ipdbg_la_receive_data(int fd, int revents, void *cb_data)
 	uint32_t raw_data_width_bytes =
 		(devc->data_width + devc->runlength_code_width + host_word_size - 1) /
 		host_word_size;
-
 	if (!devc->raw_sample_buf) {
 		devc->raw_sample_buf =
 			g_try_malloc(devc->limit_samples * raw_data_width_bytes);
@@ -396,7 +399,6 @@ SR_PRIV int ipdbg_la_receive_data(int fd, int revents, void *cb_data)
 		(devc->limit_samples_max * raw_data_width_bytes)) {
 		const size_t bufsize = 1024*16;
 		uint8_t buffer[bufsize];
-
 		const int recd = ipdbg_la_tcp_receive(tcp, buffer, bufsize);
 		if (recd > 0) {
 			int num_move = (((devc->num_transfers + recd) <=
@@ -446,10 +448,8 @@ SR_PRIV int ipdbg_la_receive_data(int fd, int revents, void *cb_data)
 
 		g_free(devc->raw_sample_buf);
 		devc->raw_sample_buf = NULL;
-
 		ipdbg_la_abort_acquisition(sdi);
 	}
-
 	return TRUE;
 }
 
@@ -631,6 +631,112 @@ static void ipdbg_la_init_runlength_coding(
 	devc->runlength_code_width = buf[0];
 }
 
+SR_PRIV void ipdbg_la_set_channel_names_and_groups(struct sr_dev_inst * sdi)
+{
+    struct dev_context *devc = sdi->priv;
+    struct ipdbg_la_tcp *tcp = sdi->conn;
+	uint8_t features_cmd = CMD_GET_CHANNEL_NAMES;
+	const uint8_t number_of_channels = devc->data_width;
+
+	if (!(devc->features & FEATURE_AUGMENTER_CH_NAMES_ENABLED)) {
+		//set default channel names
+        for (uint32_t i = 0; i < number_of_channels; i++)
+        {
+            char *name = g_strdup_printf("CH%d", i);
+            sr_channel_new(sdi, i, SR_CHANNEL_LOGIC, TRUE, name);
+            g_free(name);
+        }
+		return;
+	}
+
+    if (tcp_send(tcp, &features_cmd, 1) != SR_OK) {
+		sr_warn("Can't send cmd get channel names");
+		//set default channel names
+        for (uint32_t i = 0; i < number_of_channels; i++)
+        {
+            char *name = g_strdup_printf("CH%d", i);
+            sr_channel_new(sdi, i, SR_CHANNEL_LOGIC, TRUE, name);
+            g_free(name);
+        }
+		return;
+	}
+
+	if (tcp_send(tcp, &number_of_channels, 1) != SR_OK) {
+		sr_warn("Can't send number of channels");
+        //set default channel names
+        for (uint32_t i = 0; i < number_of_channels; i++)
+        {
+            char *name = g_strdup_printf("CH%d", i);
+            sr_channel_new(sdi, i, SR_CHANNEL_LOGIC, TRUE, name);
+            g_free(name);
+        }
+		return;
+	}
+
+	for(uint8_t i = 0; i<number_of_channels;i++){
+        //get channel name length
+        uint8_t channel_name_lenght;
+        if(tcp_receive_blocking(tcp, &channel_name_lenght, 1) != 1){
+            sr_warn("Can't get channel name length");
+            //set default channel name
+            char *name = g_strdup_printf("CH%d", i);
+            sr_channel_new(sdi, i, SR_CHANNEL_LOGIC, TRUE, name);
+            g_free(name);
+        }
+        else{
+            //get channel name
+            uint8_t channel_name[channel_name_lenght+1];
+            channel_name[channel_name_lenght] = '\0';//null terminate channel name
+            if(tcp_receive_blocking(tcp, &channel_name, channel_name_lenght) != channel_name_lenght){
+                sr_warn("Can't get channel name of CH%d", i);
+                //set default channel name
+                char *name = g_strdup_printf("CH%d", i);
+                sr_channel_new(sdi, i, SR_CHANNEL_LOGIC, TRUE, name);
+                g_free(name);
+            }
+            else{
+                sr_channel_new(sdi, i, SR_CHANNEL_LOGIC, TRUE, channel_name);
+            }
+        }
+	}
+    return;
+}
+
+SR_PRIV void ipdbg_la_set_samplerate(struct sr_dev_inst *sdi)
+{
+    struct dev_context *devc = sdi->priv;
+    struct ipdbg_la_tcp *tcp = sdi->conn;
+    const size_t buffer_size = 8;
+    uint8_t buf[buffer_size];
+	uint8_t features_cmd = CMD_GET_SAMPLE_RATE;
+
+	if (!(devc->features & FEATURE_AUGMENTER_SAMPLERATE_ENABLED)) {
+		//set no samplerate
+		return;
+	}
+
+    if (tcp_send(tcp, &features_cmd, 1) != SR_OK) {
+		sr_warn("Can't send cmd get sample rate");
+		//set no samplerate
+		return;
+	}
+
+	if(tcp_receive_blocking(tcp, buf, buffer_size) != buffer_size){
+		sr_warn("Can't receive sample rate");
+		//set no samplerate
+        return;
+    }
+
+    devc->cur_samplerate  =  buf[0]        & 0x00000000000000FF;
+	devc->cur_samplerate |= (buf[1] << 8)  & 0x000000000000FF00;
+	devc->cur_samplerate |= (buf[2] << 16) & 0x0000000000FF0000;
+	devc->cur_samplerate |= (buf[3] << 24) & 0x00000000FF000000;
+	devc->cur_samplerate |= (buf[4] << 32) & 0x000000FF00000000;
+	devc->cur_samplerate |= (buf[5] << 40) & 0x0000FF0000000000;
+	devc->cur_samplerate |= (buf[6] << 48) & 0x00FF000000000000;
+	devc->cur_samplerate |= (buf[7] << 56) & 0xFF00000000000000;
+}
+
 static void idpbg_la_init_features(
 	struct ipdbg_la_tcp *tcp, struct dev_context *devc)
 {
@@ -666,17 +772,6 @@ SR_PRIV void ipdbg_la_get_features(
 	devc->features |= (buf[3] << 24) & 0xFF000000;
 
 	idpbg_la_init_features(tcp, devc);
-}
-
-SR_PRIV void ipdbg_la_set_channel_names_and_groups(
-	struct sr_dev_inst *sdi)
-{
-	struct dev_context *devc = sdi->priv;
-	for (uint32_t i = 0; i < devc->data_width; i++) {
-		char *name = g_strdup_printf("CH%d", i);
-		sr_channel_new(sdi, i, SR_CHANNEL_LOGIC, TRUE, name);
-		g_free(name);
-	}
 }
 
 SR_PRIV struct dev_context *ipdbg_la_dev_new(void)
@@ -734,7 +829,6 @@ SR_PRIV void ipdbg_la_abort_acquisition(const struct sr_dev_inst *sdi)
 SR_PRIV int ipdbg_la_send_start(struct ipdbg_la_tcp *tcp)
 {
 	uint8_t buf = CMD_START;
-
 	if (tcp_send(tcp, &buf, 1) != SR_OK)
 		sr_warn("Couldn't send start");
 

@@ -16,9 +16,9 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-
 #include <config.h>
 #include "protocol.h"
+
 
 static const uint32_t drvopts[] = {
 	SR_CONF_LOGIC_ANALYZER,
@@ -32,6 +32,7 @@ static const uint32_t devopts[] = {
 	SR_CONF_TRIGGER_MATCH | SR_CONF_LIST,
 	SR_CONF_CAPTURE_RATIO | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_LIMIT_SAMPLES | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_SAMPLERATE    | SR_CONF_GET | SR_CONF_SET,
 };
 
 static const int32_t trigger_matches[] = {
@@ -113,10 +114,11 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		devc->data_width);
 	sr_dbg("limit samples = %" PRIu64 "\n", devc->limit_samples_max);
 
-	ipdbg_la_set_channel_names_and_groups(sdi);
-
 	sdi->inst_type = SR_INST_USER;
 	sdi->conn = tcp;
+
+    ipdbg_la_set_channel_names_and_groups(sdi);
+	ipdbg_la_set_samplerate(sdi);
 
 	ipdbg_la_tcp_close(tcp);
 
@@ -130,7 +132,6 @@ static int dev_clear(const struct sr_dev_driver *di)
 	struct drv_context *drvc = di->context;
 	struct sr_dev_inst *sdi;
 	GSList *l;
-
 	if (drvc) {
 		for (l = drvc->instances; l; l = l->next) {
 			sdi = l->data;
@@ -181,6 +182,9 @@ static int config_get(uint32_t key, GVariant **data,
 	(void)cg;
 
 	switch (key) {
+    case SR_CONF_SAMPLERATE:
+        *data = g_variant_new_uint64(devc->cur_samplerate);
+        break;
 	case SR_CONF_CAPTURE_RATIO:
 		*data = g_variant_new_uint64(devc->capture_ratio);
 		break;
@@ -240,7 +244,6 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 {
 	struct ipdbg_la_tcp *tcp = sdi->conn;
 	struct dev_context *devc = sdi->priv;
-
 	ipdbg_la_convert_trigger(sdi);
 	ipdbg_la_send_trigger(devc, tcp);
 	ipdbg_la_send_delay(devc, tcp);
@@ -250,9 +253,7 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 	 */
 	sr_session_source_add(sdi->session, tcp->socket, G_IO_IN, 100,
 		ipdbg_la_receive_data, (struct sr_dev_inst *)sdi);
-
 	ipdbg_la_send_start(tcp);
-
 	return SR_OK;
 }
 
@@ -260,7 +261,6 @@ static int dev_acquisition_stop(struct sr_dev_inst *sdi)
 {
 	struct ipdbg_la_tcp *tcp = sdi->conn;
 	struct dev_context *devc = sdi->priv;
-
 	const size_t bufsize = 1024;
 	uint8_t buffer[bufsize];
 
@@ -275,7 +275,6 @@ static int dev_acquisition_stop(struct sr_dev_inst *sdi)
 
 	ipdbg_la_send_reset(tcp);
 	ipdbg_la_abort_acquisition(sdi);
-
 	return SR_OK;
 }
 
